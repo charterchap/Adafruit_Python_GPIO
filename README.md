@@ -1,3 +1,8 @@
+## Fork Goal
+use pyftdi and python 3 (via Vestom fork)
+## Fork Status
+I have done nothing
+
 Adafruit Python GPIO Library
 ============================
 
