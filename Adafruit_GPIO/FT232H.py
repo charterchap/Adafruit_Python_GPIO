@@ -27,7 +27,10 @@ import subprocess
 import sys
 import time
 
-import ftdi1 as ftdi
+try:
+    import ftdi1 as ftdi
+except ImportError:
+    from pyftdi.ftdi import Ftdi
 
 import Adafruit_GPIO.GPIO as GPIO
 
@@ -90,7 +93,7 @@ def use_FT232H():
     with libftdi (which is used to communicate with the FT232H).  Will register
     an exit function so the drivers are re-enabled on program exit.
     """
-    disable_FTDI_driver()
+    # disable_FTDI_driver()
     atexit.register(enable_FTDI_driver)
 
 def enumerate_device_serials(vid=FT232H_VID, pid=FT232H_PID):
@@ -98,30 +101,16 @@ def enumerate_device_serials(vid=FT232H_VID, pid=FT232H_PID):
     machine.  You can use these serial numbers to open a specific FT232H device
     by passing it to the FT232H initializer's serial parameter.
     """
-    try:
-        # Create a libftdi context.
-        ctx = None
-        ctx = ftdi.new()
-        # Enumerate FTDI devices.
-        device_list = None
-        count, device_list = ftdi.usb_find_all(ctx, vid, pid)
-        if count < 0:
-            raise RuntimeError('ftdi_usb_find_all returned error {0}: {1}'.format(count, ftdi.get_error_string(self._ctx)))
-        # Walk through list of devices and assemble list of serial numbers.
-        devices = []
-        while device_list is not None:
-            # Get USB device strings and add serial to list of devices.
-            ret, manufacturer, description, serial = ftdi.usb_get_strings(ctx, device_list.dev, 256, 256, 256)
-            if serial is not None:
-                devices.append(serial)
-            device_list = device_list.next
-        return devices
-    finally:
-        # Make sure to clean up list and context when done.
-        if device_list is not None:
-            ftdi.list_free(device_list)
-        if ctx is not None:
-            ftdi.free(ctx)
+    # try:
+    # Create a libftdi context.
+    devices = []
+    ftdi = Ftdi()
+    descriptors = ftdi.find_all([(FT232H_VID,FT232H_PID)])
+    logger.debug(descriptors)
+    for vid,pid,serial,iface,desc in descriptors:
+        devices.append(serial)
+
+    return devices
 
 
 class FT232H(GPIO.BaseGPIO):
@@ -139,42 +128,43 @@ class FT232H(GPIO.BaseGPIO):
         the FT232H.enumerate_device_serials() function to see how to list all
         connected device serial numbers.
         """
+
         # Initialize FTDI device connection.
-        self._ctx = ftdi.new()
-        if self._ctx == 0:
-            raise RuntimeError('ftdi_new failed! Is libftdi1 installed?')
+        self.ftdi = Ftdi()
+
         # Register handler to close and cleanup FTDI context on program exit.
         atexit.register(self.close)
-        if serial is None:
-            # Open USB connection for specified VID and PID if no serial is specified.
-            self._check(ftdi.usb_open, vid, pid)
-        else:
-            # Open USB connection for VID, PID, serial.
-            self._check(ftdi.usb_open_string, 's:{0}:{1}:{2}'.format(vid, pid, serial))
+
+        # Open USB connection for specified VID and PID
+        # serial may be None
+        self.ftdi.open_mpsse( vid, pid, serial=serial)
+
         # Reset device.
-        self._check(ftdi.usb_reset)
+        # self._check(ftdi.usb_reset)
+
         # Disable flow control. Commented out because it is unclear if this is necessary.
         #self._check(ftdi.setflowctrl, ftdi.SIO_DISABLE_FLOW_CTRL)
         # Change read & write buffers to maximum size, 65535 bytes.
-        self._check(ftdi.read_data_set_chunksize, 65535)
-        self._check(ftdi.write_data_set_chunksize, 65535)
+        chunk_size = 0xFFFF
+        self.ftdi.read_data_set_chunksize(chunk_size)
+        self.ftdi.write_data_set_chunksize( chunk_size)
+
         # Clear pending read data & write buffers.
-        self._check(ftdi.usb_purge_buffers)
+        self.ftdi.purge_buffers()
+
         # Enable MPSSE and syncronize communication with device.
-        self._mpsse_enable()
-        self._mpsse_sync()
+        # self._mpsse_enable()
+        # self._mpsse_sync()
         # Initialize all GPIO as inputs.
-        self._write('\x80\x00\x00\x82\x00\x00')
+        self._write(b'\x80\x00\x00\x82\x00\x00')
         self._direction = 0x0000
         self._level = 0x0000
 
     def close(self):
         """Close the FTDI device.  Will be automatically called when the program ends."""
-        if self._ctx is not None:
-            ftdi.free(self._ctx)
-        self._ctx = None
+        self.ftdi.close()
 
-    def _write(self, string):
+    def _write(self, data):
         """Helper function to call write_data on the provided FTDI device and
         verify it succeeds.
         """
@@ -184,27 +174,17 @@ class FT232H(GPIO.BaseGPIO):
         #	logger.debug('Modem status {0:02X}'.format(status))
         #else:
         #	logger.debug('Modem status error {0}'.format(ret))
-        length = len(string)
-        try:
-            ret = ftdi.write_data(self._ctx, string, length)
-        except TypeError:
-            ret = ftdi.write_data(self._ctx, string); #compatible with libFtdi 1.3
-        # Log the string that was written in a python hex string format using a very
-        # ugly one-liner list comprehension for brevity.
-        #logger.debug('Wrote {0}'.format(''.join(['\\x{0:02X}'.format(ord(x)) for x in string])))
-        if ret < 0:
-            raise RuntimeError('ftdi_write_data failed with error {0}: {1}'.format(ret, ftdi.get_error_string(self._ctx)))
-        if ret != length:
-            raise RuntimeError('ftdi_write_data expected to write {0} bytes but actually wrote {1}!'.format(length, ret))
+        self.ftdi.write_data(data)
 
-    def _check(self, command, *args):
-        """Helper function to call the provided command on the FTDI device and
-        verify the response matches the expected value.
-        """
-        ret = command(self._ctx, *args)
-        logger.debug('Called ftdi_{0} and got response {1}.'.format(command.__name__, ret))
-        if ret != 0:
-            raise RuntimeError('ftdi_{0} failed with error {1}: {2}'.format(command.__name__, ret, ftdi.get_error_string(self._ctx)))
+
+    # def _check(self, command, *args):
+    #     """Helper function to call the provided command on the FTDI device and
+    #     verify the response matches the expected value.
+    #     """
+    #     ret = command(*args)
+    #     logger.debug('Called ftdi_{0} and got response {1}.'.format(command.__name__, ret))
+    #     if ret != 0:
+    #         raise RuntimeError('ftdi_{0} failed with error {1}: {2}'.format(command.__name__, ret, ftdi.get_error_string(self._ctx)))
 
     def _poll_read(self, expected, timeout_s=5.0):
         """Helper function to continuously poll reads on the FTDI device until an
@@ -218,80 +198,80 @@ class FT232H(GPIO.BaseGPIO):
         index = 0
         # Loop calling read until the response buffer is full or a timeout occurs.
         while time.time() - start <= timeout_s:
-            ret, data = ftdi.read_data(self._ctx, expected - index)
+            data = self.ftdi.read_data(expected)
             # Fail if there was an error reading data.
-            if ret < 0:
-                raise RuntimeError('ftdi_read_data failed with error code {0}.'.format(ret))
-            # Add returned data to the buffer.
-            response[index:index+ret] = data[:ret]
-            index += ret
+            # if ret < 0:
+            #     raise RuntimeError('ftdi_read_data failed with error code {0}.'.format(ret))
+            # # Add returned data to the buffer.
+            # response[index:index+ret] = data[:ret]
+            # index += ret
             # Buffer is full, return the result data.
-            if index >= expected:
-                return str(response)
+            if len(data) <= expected:
+                return str(data) # just return data...
+
             time.sleep(0.01)
         raise RuntimeError('Timeout while polling ftdi_read_data for {0} bytes!'.format(expected))
 
     def _mpsse_enable(self):
         """Enable MPSSE mode on the FTDI device."""
-        # Reset MPSSE by sending mask = 0 and mode = 0
-        self._check(ftdi.set_bitmode, 0, 0)
-        # Enable MPSSE by sending mask = 0 and mode = 2
-        self._check(ftdi.set_bitmode, 0, 2)
+        self._check(self.ftdi.has_mpsse, True)
+        # # Reset MPSSE by sending mask = 0 and mode = 0
+        # self._check(self.ftdi.set_bitmode, 0, 0)
+        # # Enable MPSSE by sending mask = 0 and mode = 2
+        # self._check(self.ftdi.set_bitmode, 0, 2)
 
-    def _mpsse_sync(self, max_retries=10):
-        """Synchronize buffers with MPSSE by sending bad opcode and reading expected
-        error response.  Should be called once after enabling MPSSE."""
-        # Send a bad/unknown command (0xAB), then read buffer until bad command
-        # response is found.
-        self._write('\xAB')
-        # Keep reading until bad command response (0xFA 0xAB) is returned.
-        # Fail if too many read attempts are made to prevent sticking in a loop.
-        tries = 0
-        sync = False
-        while not sync:
-            data = self._poll_read(2)
-            if data == '\xFA\xAB':
-                sync = True
-            tries += 1
-            if tries >= max_retries:
-                raise RuntimeError('Could not synchronize with FT232H!')
+    # def _mpsse_sync(self, max_retries=10):
+    #     """Synchronize buffers with MPSSE by sending bad opcode and reading expected
+    #     error response.  Should be called once after enabling MPSSE."""
+    #     # Send a bad/unknown command (0xAB), then read buffer until bad command
+    #     # response is found.
+    #     self._write('\xAB')
+    #     # Keep reading until bad command response (0xFA 0xAB) is returned.
+    #     # Fail if too many read attempts are made to prevent sticking in a loop.
+    #     tries = 0
+    #     sync = False
+    #     while not sync:
+    #         data = self._poll_read(2)
+    #         if data == '\xFA\xAB':
+    #             sync = True
+    #         tries += 1
+    #         if tries >= max_retries:
+    #             raise RuntimeError('Could not synchronize with FT232H!')
 
     def mpsse_set_clock(self, clock_hz, adaptive=False, three_phase=False):
         """Set the clock speed of the MPSSE engine.  Can be any value from 450hz
         to 30mhz and will pick that speed or the closest speed below it.
         """
         # Disable clock divisor by 5 to enable faster speeds on FT232H.
-        self._write('\x8A')
+        # self._write('\x8A')
+
         # Turn on/off adaptive clocking.
-        if adaptive:
-            self._write('\x96')
-        else:
-            self._write('\x97')
+        self.ftdi.enable_adaptive_clock(adaptive)
+
         # Turn on/off three phase clock (needed for I2C).
         # Also adjust the frequency for three-phase clocking as specified in section 2.2.4
         # of this document:
         #   http://www.ftdichip.com/Support/Documents/AppNotes/AN_255_USB%20to%20I2C%20Example%20using%20the%20FT232H%20and%20FT201X%20devices.pdf
-        if three_phase:
-            self._write('\x8C')
-        else:
-            self._write('\x8D')
+        self.ftdi.enable_3phase_clock(three_phase)
+
         # Compute divisor for requested clock.
         # Use equation from section 3.8.1 of:
         #  http://www.ftdichip.com/Support/Documents/AppNotes/AN_108_Command_Processor_for_MPSSE_and_MCU_Host_Bus_Emulation_Modes.pdf
         # Note equation is using 60mhz master clock instead of 12mhz.
-        divisor = int(math.ceil((30000000.0-float(clock_hz))/float(clock_hz))) & 0xFFFF
-        if three_phase:
-            divisor = int(divisor*(2.0/3.0))
-        logger.debug('Setting clockspeed with divisor value {0}'.format(divisor))
-        # Send command to set divisor from low and high byte values.
-        self._write(str(bytearray((0x86, divisor & 0xFF, (divisor >> 8) & 0xFF))))
+        self.ftdi.set_frequency(clock_hz)
+        # divisor = int(math.ceil((30000000.0-float(clock_hz))/float(clock_hz))) & 0xFFFF
+        # if three_phase:
+        #     divisor = int(divisor*(2.0/3.0))
+        # logger.debug('Setting clockspeed with divisor value {0}'.format(divisor))
+        # # Send command to set divisor from low and high byte values.
+        # self._write(str(bytearray((0x86, divisor & 0xFF, (divisor >> 8) & 0xFF))))
 
     def mpsse_read_gpio(self):
         """Read both GPIO bus states and return a 16 bit value with their state.
         D0-D7 are the lower 8 bits and C0-C7 are the upper 8 bits.
         """
         # Send command to read low byte and high byte.
-        self._write('\x81\x83')
+        self._write(b'\x81\x83')
         # Wait for 2 byte response.
         data = self._poll_read(2)
         # Assemble response into 16 bit value.
@@ -304,11 +284,11 @@ class FT232H(GPIO.BaseGPIO):
         """Return command to update the MPSSE GPIO state to the current direction
         and level.
         """
-        level_low  = chr(self._level & 0xFF)
-        level_high = chr((self._level >> 8) & 0xFF)
-        dir_low  = chr(self._direction & 0xFF)
-        dir_high = chr((self._direction >> 8) & 0xFF)
-        return str(bytearray((0x80, level_low, dir_low, 0x82, level_high, dir_high)))
+        level_low  = self._level & 0xFF
+        level_high = (self._level >> 8) & 0xFF
+        dir_low  = self._direction & 0xFF
+        dir_high = (self._direction >> 8) & 0xFF
+        return bytes([0x80, level_low, dir_low, 0x82, level_high, dir_high])
 
     def mpsse_write_gpio(self):
         """Write the current MPSSE GPIO state to the FT232H chip."""
@@ -470,6 +450,8 @@ class SPI(object):
         """Half-duplex SPI write.  The specified array of bytes will be clocked
         out the MOSI line.
         """
+        logger.debug("spi write")
+        logger.debug(data)
         #check for hardware limit of FT232H and similar MPSSE chips
         if (len(data) > 65536):
             print('the FTDI chip is limited to 65536 bytes (64 KB) of input/output per command!')
@@ -481,22 +463,28 @@ class SPI(object):
         # Compute length low and high bytes.
         # NOTE: Must actually send length minus one because the MPSSE engine
         # considers 0 a length of 1 and FFFF a length of 65536
-	# splitting into two lists for two commands to prevent buffer errors
-	data1 = data[:len(data)/2]
-	data2 = data[len(data)/2:]
-        len_low1  = (len(data1) - 1) & 0xFF
-        len_high1 = ((len(data1) - 1) >> 8) & 0xFF
-	len_low2  = (len(data2) - 1) & 0xFF
-        len_high2 = ((len(data2) - 1) >> 8) & 0xFF
-        self._assert_cs()
+        # splitting into two lists for two commands to prevent buffer errors
+        # data1 = data[:len(data)//2]
+        # data2 = data[len(data)//2:]
+        # len_low1  = (len(data1) - 1) & 0xFF
+        # len_high1 = ((len(data1) - 1) >> 8) & 0xFF
+        # len_low2  = (len(data2) - 1) & 0xFF
+        # len_high2 = ((len(data2) - 1) >> 8) & 0xFF
+
+
+        self._assert_cs() # what is this?
+        self._ft232h._write(bytearray([command])+data)
+
         # Send command and length, then data, split into two commands, handle for length 1
-	if len(data1) > 0:
-            self._ft232h._write(str(bytearray((command, len_low1, len_high1))))
-            self._ft232h._write(str(bytearray(data1)))
-        if len(data2) > 0:
-	    self._ft232h._write(str(bytearray((command, len_low2, len_high2))))
-	    self._ft232h._write(str(bytearray(data2)))
-        self._deassert_cs()
+        # if len(data1) > 0:
+        #     self._ft232h._write(bytearray((command, len_low1, len_high1)))
+        #     self._ft232h._write(bytearray(data1))
+        # if len(data2) > 0:
+        #     self._ft232h._write(bytearray((command, len_low2, len_high2)))
+        #     self._ft232h._write(bytearray(data2))
+
+
+            # self._deassert_cs() # what is this?
 
     def read(self, length):
         """Half-duplex SPI read.  The specified length of bytes will be clocked
@@ -513,25 +501,25 @@ class SPI(object):
         # Compute length low and high bytes.
         # NOTE: Must actually send length minus one because the MPSSE engine
         # considers 0 a length of 1 and FFFF a length of 65536
-	#force odd numbers to round up instead of down
-	lengthR = length
-	if length % 2 == 1:
-	    lengthR += 1
-	lengthR = lengthR/2
-	#when odd length requested, get the remainder instead of the same number
-	lenremain = length - lengthR
+        #force odd numbers to round up instead of down
+        lengthR = length
+        if length % 2 == 1:
+            lengthR += 1
+        lengthR = lengthR/2
+        #when odd length requested, get the remainder instead of the same number
+        lenremain = length - lengthR
         len_low  = (lengthR - 1) & 0xFF
         len_high = ((lengthR - 1) >> 8) & 0xFF
         self._assert_cs()
         # Send command and length.
         # Perform twice to prevent error from hardware defect/limits
-        self._ft232h._write(str(bytearray((command, len_low, len_high))))
+        self._ft232h._write(bytearray((command, len_low, len_high)))
         payload1 = self._ft232h._poll_read(lengthR)
-        self._ft232h._write(str(bytearray((command, len_low, len_high))))
+        self._ft232h._write(bytearray((command, len_low, len_high)))
         payload2 = self._ft232h._poll_read(lenremain)
         self._deassert_cs()
         # Read response bytes
-        return bytearray(payload1 + payload2)
+        return bytes([payload1, payload2])
 
     def bulkread(self, data = [], lengthR = 'None', readmode = 1):
         """Half-duplex SPI write then read. Send command and payload to slave as bytearray
@@ -559,12 +547,12 @@ class SPI(object):
         len_highW = ((lengthW) >> 8) & 0xFF
         commandR = 0x20 | (self.lsbfirst << 3) | (self.read_clock_ve << 2)
         #force odd numbers to round up instead of down
-	length = lengthR
-	if lengthR % 2 == 1:
-	    length += 1
-	length = length/2
-        #when odd length requested, get the remainder instead of the same number
-	lenremain = lengthR - length
+        length = lengthR
+        if lengthR % 2 == 1:
+            length += 1
+        length = length/2
+            #when odd length requested, get the remainder instead of the same number
+        lenremain = lengthR - length
         len_lowR  = (length - 1) & 0xFF
         len_highR = ((length - 1) >> 8) & 0xFF
         #logger debug info
@@ -573,12 +561,12 @@ class SPI(object):
         #begin command set
         self._assert_cs()
         #write command, these have to be separated due to TypeError
-        self._ft232h._write(str(bytearray((commandW, len_lowW, len_highW))))
-        self._ft232h._write(str(bytearray(data)))
+        self._ft232h._write(bytearray((commandW, len_lowW, len_highW)))
+        self._ft232h._write(bytearray(data))
         #read command, which is divided into two commands
-        self._ft232h._write(str(bytearray((commandR, len_lowR, len_highR))))
+        self._ft232h._write(bytearray((commandR, len_lowR, len_highR)))
         payload1 = self._ft232h._poll_read(length)
-        self._ft232h._write(str(bytearray((commandR, len_lowR, len_highR))))
+        self._ft232h._write(bytearray((commandR, len_lowR, len_highR)))
         payload2 = self._ft232h._poll_read(lenremain)
         self._deassert_cs()
         #end command set
@@ -602,25 +590,25 @@ class SPI(object):
         # NOTE: Must actually send length minus one because the MPSSE engine
         # considers 0 a length of 1 and FFFF a length of 65536
         data1 = data[:len(data)/2]
-	data2 = data[len(data)/2:]
-	len_low1  = (len(data1) - 1) & 0xFF
+        data2 = data[len(data)/2:]
+        len_low1  = (len(data1) - 1) & 0xFF
         len_high1 = ((len(data1) - 1) >> 8) & 0xFF
-	len_low2  = (len(data2) - 1) & 0xFF
+        len_low2  = (len(data2) - 1) & 0xFF
         len_high2 = ((len(data2) - 1) >> 8) & 0xFF
-	payload1 = ''
-	payload2 = ''
-	#start command set
+        payload1 = ''
+        payload2 = ''
+        # start command set
         self._assert_cs()
         # Perform twice to prevent error from hardware defect/limits
-	# Send command and length, then data, split into two commands, handle for length 1
-	if len(data1) > 0:
-	    self._ft232h._write(str(bytearray((command, len_low1, len_high1))))
-	    self._ft232h._write(str(bytearray(data1)))
-	    payload1 = self._ft232h._poll_read(len(data1))
-	if len(data2) > 0:
-	    self._ft232h._write(str(bytearray((command, len_low2, len_high2))))
-	    self._ft232h._write(str(bytearray(data2)))
-	    payload2 = self._ft232h._poll_read(len(data2))
+        # Send command and length, then data, split into two commands, handle for length 1
+        if len(data1) > 0:
+            self._ft232h._write(bytearray((command, len_low1, len_high1)))
+            self._ft232h._write(bytearray(data1))
+            payload1 = self._ft232h._poll_read(len(data1))
+        if len(data2) > 0:
+            self._ft232h._write(bytearray((command, len_low2, len_high2)))
+            self._ft232h._write(bytearray(data2))
+            payload2 = self._ft232h._poll_read(len(data2))
         #self._ft232h._write('\x87')
         self._deassert_cs()
         # Read response bytes.
@@ -642,7 +630,7 @@ class I2CDevice(object):
         # Enable drive-zero mode to drive outputs low on 0 and tri-state on 1.
         # This matches the protocol for I2C communication so multiple devices can
         # share the I2C bus.
-        self._ft232h._write('\x9E\x07\x00')
+        self._ft232h._write(b'\x9E\x07\x00')
         self._idle()
 
     def _idle(self):
@@ -662,7 +650,7 @@ class I2CDevice(object):
         # Ask to return response bytes immediately.
         self._command.append('\x87')
         # Send the entire command to the MPSSE.
-        self._ft232h._write(''.join(self._command))
+        self._ft232h._write(bytearray(''.join(self._command)))
         # Read response bytes and return them.
         return bytearray(self._ft232h._poll_read(self._expected))
 
