@@ -1,7 +1,7 @@
 ## Fork Goal
 use pyftdi and python 3 (via Vestom fork)
 ## Fork Status
-I have done nothing
+Runs on OSX mojave and Windows 10 via pyftdi. Not really tested much though.
 
 Adafruit Python GPIO Library
 ============================
